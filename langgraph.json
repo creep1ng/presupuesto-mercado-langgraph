@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "presupuesto_mercado": "./src/presupuesto_mercado/grafo.py:grafo"
+  },
+  "env": ".env"
+}
