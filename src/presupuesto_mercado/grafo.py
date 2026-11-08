@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import operator
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ from .presupuesto import construir_presupuestos, elegir_recomendacion
 from .proveedores import (
     POR_DEFECTO, PROVEEDORES_WEB, SIN_PRECIOS_EN_LINEA, Proveedor, ProveedorCatalogo, resolver_proveedor,
 )
-from .reporte import generar_informe
+from .reporte import cop, generar_informe
 
 
 class Estado(TypedDict, total=False):
@@ -201,6 +202,45 @@ def presupuestar(estado: Estado) -> dict:
             "decision": elegir_recomendacion(por_proveedor, combinado)}
 
 
+PROMPT_RECOMENDACION = """Redacta en español la explicación de la recomendación de un presupuesto de mercado.
+- Trata al usuario de "usted". Sin títulos.
+- Usa SOLO los datos del JSON: no inventes precios, tiendas ni costos, y no cambies la opción elegida en "decision".
+- Los precios son los publicados en los sitios web sin seleccionar tienda ni dirección: NO afirmes que corresponden \
+a la ciudad del usuario; advierte que pueden variar allí.
+- En 1 o 2 párrafos breves explica por qué se recomienda la opción, con su subtotal de productos, y deja claro que \
+el total final no está confirmado si el envío no está verificado.
+- Luego, en una lista de máximo 5 puntos, señala riesgos o limitaciones concretas (productos sin cotizar, \
+sustitutos, presentaciones poco prácticas, precios con tarjeta no aplicados)."""
+
+
+def _resumen_para_llm(estado: Estado) -> dict:
+    nombres_items = {i.id: i.producto for i in estado["solicitud"].items}
+
+    def resumen(p: Presupuesto) -> dict:
+        return {
+            "opcion": p.nombre,
+            "productos_cubiertos": f"{len(p.lineas)} de {len(estado['solicitud'].items)}",
+            "cobertura_completa": p.cobertura_completa,
+            "subtotal_productos": cop(p.subtotal_productos),
+            "envio": [f"{c.concepto}: {cop(c.valor) if c.valor is not None else 'no verificado'}" for c in p.costos_adicionales],
+            "total_final": cop(p.total_confirmado) if p.total_confirmado is not None else "no confirmado",
+            "sin_cotizacion": [nombres_items.get(i, i) for i in p.items_sin_cotizacion],
+            "lineas": [
+                {"producto": nombres_items.get(l.item_id, l.item_id), "tipo": l.tipo, "costo": cop(l.costo),
+                 "articulos": [f"{n} x {o.nombre} ({cop(o.precio)})" for o, n in l.empaques], "notas": l.notas}
+                for l in p.lineas
+            ],
+        }
+
+    return {
+        "ciudad": estado["solicitud"].ciudad,
+        "decision": estado["decision"],
+        "presupuestos": [resumen(p) for p in estado["presupuestos"]],
+        "combinado": resumen(estado["combinado"]) if estado.get("combinado") else None,
+        "suposiciones": estado["solicitud"].suposiciones,
+    }
+
+
 def _recomendacion_reglas(estado: Estado) -> str:
     decision = estado["decision"]
     if not decision.get("opcion"):
@@ -211,8 +251,22 @@ def _recomendacion_reglas(estado: Estado) -> str:
     return "\n".join(texto)
 
 
-def recomendar(estado: Estado) -> dict:
-    return {"recomendacion": _recomendacion_reglas(estado)}
+async def recomendar(estado: Estado, config: RunnableConfig) -> dict:
+    llm = _llm(config)
+    base = _recomendacion_reglas(estado)
+    if llm is None or not estado["decision"].get("opcion"):
+        return {"recomendacion": base}
+    try:
+        respuesta = await llm.ainvoke([
+            ("system", PROMPT_RECOMENDACION),
+            ("human", json.dumps(_resumen_para_llm(estado), ensure_ascii=False, indent=1)),
+        ])
+        explicacion = respuesta.content if isinstance(respuesta.content, str) else "".join(
+            b.get("text", "") for b in respuesta.content if isinstance(b, dict)
+        )
+        return {"recomendacion": f"{base}\n\n{explicacion.strip()}"}
+    except Exception as e:
+        return {"recomendacion": base, "avisos": [f"No se pudo redactar la recomendación con LLM ({type(e).__name__})"]}
 
 
 def informe(estado: Estado) -> dict:
