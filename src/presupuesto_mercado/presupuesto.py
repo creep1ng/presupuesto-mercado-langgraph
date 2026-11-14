@@ -181,7 +181,8 @@ def construir_presupuestos(
             if linea:
                 lineas.append(linea)
                 candidatas[item.id].append(linea)
-        por_proveedor.append(_armar(f"Compra completa en {nombres.get(p, p)}", solicitud, lineas, [p], nombres))
+        alcance = "completa" if len(lineas) == len(solicitud.items) else "parcial"
+        por_proveedor.append(_armar(f"Compra {alcance} en {nombres.get(p, p)}", solicitud, lineas, [p], nombres))
 
     # Combinada: por ítem, la línea más barata entre proveedores (equivalentes antes que sustitutos)
     elegidas = []
@@ -228,12 +229,21 @@ def elegir_recomendacion(por_proveedor: list[Presupuesto], combinado: Presupuest
                     f"La compra combinada solo ahorraría {cop(ahorro)}, que no compensa {extra} domicilio(s) "
                     f"adicional(es) de costo desconocido (umbral: {cop(umbral)})"
                 )
-    elif combinado:
+    elif combinado and combinado.cobertura_completa:
         resultado["opcion"] = combinado.nombre
-        resultado["motivos"].append("Ningún proveedor cubre todos los productos; la compra combinada es la de mayor cobertura")
+        resultado["motivos"].append(
+            "Ningún proveedor tiene todos los productos por sí solo; combinando "
+            f"{len(combinado.proveedores)} proveedores se cubre la lista completa"
+        )
     else:
-        mejor = max(por_proveedor, key=lambda p: (len(p.lineas), -p.subtotal_productos), default=None)
-        if mejor and mejor.lineas:
-            resultado["opcion"] = mejor.nombre
-            resultado["motivos"].append("Ningún proveedor cubre todos los productos; es el de mayor cobertura")
+        # Sin cobertura completa no se recomienda: un subtotal parcial no es un presupuesto de la lista.
+        resultado["motivos"].append("Ninguna opción cubre todos los productos pedidos")
+        parciales = [p for p in por_proveedor + ([combinado] if combinado else []) if p.lineas]
+        if parciales:
+            mejor = max(parciales, key=lambda p: (len(p.lineas), -p.subtotal_productos))
+            total = len(mejor.lineas) + len(mejor.items_sin_cotizacion)
+            resultado["motivos"].append(
+                f"Solo como referencia: {mejor.nombre} cotiza {len(mejor.lineas)} de {total} productos "
+                f"por {cop(mejor.subtotal_productos)}"
+            )
     return resultado

@@ -30,7 +30,11 @@ Este documento registra las decisiones tomadas durante el desarrollo, su justifi
 
 - Hay un intervalo mínimo entre solicitudes al mismo dominio y la concurrencia está limitada.
 - Hay una caché de 6 horas para páginas y de 7 días para sitemaps.
-- Si un sitio responde 403/429 o muestra un reto anti-bots, se deja de consultar y se reporta. No se intenta eludir ninguna protección.
+- Si un sitio responde 403/429 o muestra un reto anti-bots, se deja de consultar ese dominio durante 30 minutos y se reporta como "no se pudo consultar". No se intenta eludir ninguna protección: no se resuelven retos ni se ocultan las huellas del navegador.
+- Las fallas transitorias de red (tiempo agotado, `net::ERR_…`) se reintentan hasta tres veces con espera creciente. Un bloqueo no se reintenta.
+- Si varias consultas necesitan la misma página al mismo tiempo (por ejemplo, arroz y azúcar en la categoría de granos de D1), se descarga una sola vez.
+
+**Sitemaps con Chromium (noviembre de 2026).** Desde noviembre de 2026, Éxito responde 403 (página de Cloudflare) a los clientes HTTP que no son navegadores, incluso en el sitemap, que `robots.txt` permite. Chromium recibe el mismo sitemap con 200, sin reto. Por eso los sitemaps se descargan con Playwright, igual que las páginas de categoría. No es una evasión: el navegador no resuelve ningún reto ni oculta que es automatizado (el agente de usuario dice `PresupuestoMercado/0.1 (proyecto academico)`). Si el sitio llegara a mostrar un reto a Chromium, la consulta se detiene igual que antes.
 
 ## 2. Qué precio se usa
 
@@ -71,9 +75,14 @@ La regla es explícita y se aplica en `presupuesto.elegir_recomendacion`:
 
 1. Entre los proveedores con cobertura completa, se recomienda el de menor subtotal.
 2. La compra combinada solo se recomienda si ahorra más de max($5.000, 3 % del subtotal) por cada domicilio adicional que exige (número de proveedores − 1). Ese umbral representa el costo de domicilios que no son verificables.
+3. Si ningún proveedor cubre la lista solo, pero la compra combinada sí, se recomienda la combinada.
+4. Si ninguna opción cubre la lista completa, no se recomienda ninguna: un subtotal parcial no es un presupuesto de lo pedido. La opción con más productos se menciona solo como referencia.
+
+Un presupuesto de un proveedor se llama "compra completa" solo si cubre todos los productos; si no, "compra parcial". Los proveedores sin ningún producto cotizado no aparecen como opción.
 
 ## 7. Proveedores por defecto
 
 - Si el usuario no nombra supermercados, se consultan los cinco con conector web.
-- Si pide "N supermercados" sin nombrarlos, se usan los primeros N de la lista por defecto (Éxito, D1, …), y la suposición queda registrada.
+- Si pide "N supermercados" sin nombrarlos, se consultan los cinco y se presentan los N con más productos cotizados y, a igual cobertura, menor subtotal. La suposición queda registrada con los que no se presentan.
+  - *Descartado:* tomar los primeros N de la lista por defecto. Elegía por posición y no por precio, y si uno de ellos fallaba (como Éxito con el 403 de noviembre de 2026) no había reemplazo.
 - Si nombra menos de dos, se completa hasta dos, también con suposición explícita.

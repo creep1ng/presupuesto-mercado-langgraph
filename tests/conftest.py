@@ -38,6 +38,17 @@ class Falso(Proveedor):
                                  fuentes=[FuenteConsultada(url=f"{self.sitio}/cat", fecha_consulta=FECHA)])
 
 
+class Caido(Proveedor):
+    """Proveedor cuyo sitio rechaza la consulta (p. ej. 403)."""
+    mecanismo = "simulado"
+
+    def __init__(self, id):
+        self.id, self.nombre, self.sitio = id, id.upper(), f"https://{id}.test"
+
+    async def consultar(self, item, nav):
+        return ResultadoConsulta(proveedor=self.id, item_id=item.id, errores=[f"{self.sitio}/sitemap.xml respondió 403"])
+
+
 @pytest.fixture
 def falsos(monkeypatch):
     tiendas = {
@@ -47,3 +58,15 @@ def falsos(monkeypatch):
     clases = {k: (lambda k=k: Falso(k, tiendas[k])) for k in tiendas}
     monkeypatch.setattr(modulo_grafo, "PROVEEDORES_WEB", clases)
     monkeypatch.setattr(modulo_grafo, "POR_DEFECTO", list(tiendas))
+
+
+@pytest.fixture
+def tres_tiendas(monkeypatch):
+    """Éxito caído, D1 con un solo producto y Jumbo con la lista completa."""
+    tiendas = {
+        "d1": [("Arroz Blanco Y 1000 Grs", 3000)],
+        "jumbo": [("Arroz Blanco Z 1000 Grs", 3500), ("Aceite Vegetal Z 1000 Ml", 7000)],
+    }
+    clases = {"exito": lambda: Caido("exito"), **{k: (lambda k=k: Falso(k, tiendas[k])) for k in tiendas}}
+    monkeypatch.setattr(modulo_grafo, "PROVEEDORES_WEB", clases)
+    monkeypatch.setattr(modulo_grafo, "POR_DEFECTO", ["exito", "d1", "jumbo"])

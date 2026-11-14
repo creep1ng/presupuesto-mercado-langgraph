@@ -68,6 +68,12 @@ def _presupuesto_md(p: Presupuesto, nombres_items: dict[str, str], nombres_prov:
     return "\n".join(partes)
 
 
+def consulta_fallida(resultados: list[ResultadoConsulta], proveedor: str, item_id: str) -> bool:
+    """El proveedor no devolvió ofertas para el ítem porque la consulta falló, no porque no las tenga."""
+    propios = [r for r in resultados if r.proveedor == proveedor and r.item_id == item_id]
+    return bool(propios) and all(r.errores and not r.ofertas for r in propios)
+
+
 def generar_informe(
     solicitud: Solicitud,
     proveedores: list[str],
@@ -154,8 +160,12 @@ def generar_informe(
             md.append(f"\n_{descartados} resultado(s) del listado se descartaron por no estar relacionados._")
 
     md += ["", "## 3. Presupuestos", ""]
-    for p in por_proveedor:
+    cotizados = [p for p in por_proveedor if p.lineas]
+    for p in cotizados:
         md += [_presupuesto_md(p, nombres_items, nombres_prov), ""]
+    vacios = [nombres_prov.get(p.proveedores[0], p.proveedores[0]) for p in por_proveedor if not p.lineas]
+    if vacios:
+        md += [f"Sin presupuesto (ningún producto cotizado): {', '.join(vacios)}. El motivo está en la sección 5.", ""]
     if combinado:
         md += [_presupuesto_md(combinado, nombres_items, nombres_prov), ""]
     else:
@@ -166,16 +176,20 @@ def generar_informe(
         [p.nombre, f"{len(p.lineas)}/{len(solicitud.items)}", cop(p.subtotal_productos),
          "no verificado" if any(c.valor is None for c in p.costos_adicionales) else cop(sum(c.valor or 0 for c in p.costos_adicionales)),
          cop(p.total_confirmado) if p.total_confirmado is not None else "no confirmado"]
-        for p in por_proveedor + ([combinado] if combinado else [])
+        for p in cotizados + ([combinado] if combinado else [])
     ]
     md.append(_tabla(["Opción", "Productos cubiertos", "Subtotal productos", "Envío", "Total final"], filas))
 
     md += ["", "## 5. Productos sin cotización", ""]
     sin = []
     for item in solicitud.items:
-        faltan = [nombres_prov.get(p.proveedores[0], p.proveedores[0]) for p in por_proveedor if item.id in p.items_sin_cotizacion]
-        if faltan:
-            sin.append(f"- **{item.producto}:** sin oferta equivalente disponible en {', '.join(faltan)}")
+        faltan = [p.proveedores[0] for p in por_proveedor if item.id in p.items_sin_cotizacion]
+        fallidas = [nombres_prov.get(p, p) for p in faltan if consulta_fallida(resultados, p, item.id)]
+        sin_oferta = [nombres_prov.get(p, p) for p in faltan if not consulta_fallida(resultados, p, item.id)]
+        if fallidas:
+            sin.append(f"- **{item.producto}:** no se pudo consultar en {', '.join(fallidas)} (ver incidencias)")
+        if sin_oferta:
+            sin.append(f"- **{item.producto}:** sin oferta equivalente disponible en {', '.join(sin_oferta)}")
     md += sin or ["- Todos los productos tienen al menos una cotización por proveedor."]
     errores = [(r.proveedor, r.item_id, e) for r in resultados for e in r.errores]
     if errores:

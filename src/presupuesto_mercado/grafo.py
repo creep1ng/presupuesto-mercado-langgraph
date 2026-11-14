@@ -38,6 +38,7 @@ class Estado(TypedDict, total=False):
     preguntas: list[str]
     aclarado: bool
     proveedores: list[str]
+    presentar: int | None  # "consulte N supermercados": se consultan todos y se presentan los N mejores
     nombres: dict[str, str]
     mecanismos: dict[str, str]
     resultados: Annotated[list[ResultadoConsulta], operator.add]
@@ -142,18 +143,12 @@ def planificar(estado: Estado) -> dict:
     for p in opciones.get("catalogos") or {}:
         if p not in proveedores:
             proveedores.append(p)
+    presentar = None
     if not pedidos:
+        proveedores = list(dict.fromkeys(proveedores + POR_DEFECTO))
         n = solicitud.numero_proveedores
-        if n:
-            elegidos = POR_DEFECTO[: max(2, n)]
-            proveedores = list(dict.fromkeys(proveedores + elegidos))
-            solicitud.suposiciones.append(
-                f"Se pidió consultar {n} supermercado(s) sin nombrarlos: se eligieron "
-                f"{', '.join(PROVEEDORES_WEB[p].nombre for p in elegidos)} (cadena tradicional y cadena de descuento "
-                "con tienda en línea y cobertura nacional)"
-            )
-        else:
-            proveedores = list(dict.fromkeys(proveedores + POR_DEFECTO))
+        if n and n < len(proveedores):
+            presentar = max(2, n)
     elif len(proveedores) < 2:
         extra = [p for p in POR_DEFECTO if p not in proveedores][: 2 - len(proveedores)]
         proveedores += extra
@@ -165,6 +160,7 @@ def planificar(estado: Estado) -> dict:
     return {
         "solicitud": solicitud,
         "proveedores": proveedores,
+        "presentar": presentar,
         "nombres": {p: i.nombre for p, i in instancias.items()},
         "mecanismos": {p: i.mecanismo for p, i in instancias.items()},
         "avisos": avisos,
@@ -194,11 +190,29 @@ async def evaluar(estado: Estado, config: RunnableConfig) -> dict:
 
 def presupuestar(estado: Estado) -> dict:
     opciones = estado.get("opciones") or {}
+    solicitud, nombres = estado["solicitud"], estado["nombres"]
+    sustitutos = bool(opciones.get("aceptar_sustitutos"))
     por_proveedor, combinado = construir_presupuestos(
-        estado["solicitud"], estado["evaluadas"], estado["proveedores"], estado["nombres"],
-        aceptar_sustitutos=bool(opciones.get("aceptar_sustitutos")),
+        solicitud, estado["evaluadas"], estado["proveedores"], nombres, aceptar_sustitutos=sustitutos,
     )
-    return {"presupuestos": por_proveedor, "combinado": combinado,
+    n = estado.get("presentar")
+    if n:
+        # Se pidieron N supermercados sin nombrarlos: se consultaron todos y se presentan los N
+        # con más productos cotizados y, a igual cobertura, menor subtotal.
+        mejores = [p.proveedores[0] for p in sorted(
+            (p for p in por_proveedor if p.lineas), key=lambda p: (-len(p.lineas), p.subtotal_productos))][:n]
+        descartados = [nombres[p] for p in estado["proveedores"] if p not in mejores]
+        solicitud = solicitud.model_copy(deep=True)
+        solicitud.suposiciones.append(
+            f"Se pidió comparar {solicitud.numero_proveedores} supermercado(s) sin nombrarlos: se consultaron "
+            f"todos y se presentan los de mayor cobertura y menor subtotal "
+            f"({', '.join(nombres[p] for p in mejores) or 'ninguno con ofertas'}). "
+            f"No se presentan: {', '.join(descartados) or 'ninguno'}."
+        )
+        por_proveedor, combinado = construir_presupuestos(
+            solicitud, estado["evaluadas"], mejores, nombres, aceptar_sustitutos=sustitutos,
+        )
+    return {"solicitud": solicitud, "presupuestos": por_proveedor, "combinado": combinado,
             "decision": elegir_recomendacion(por_proveedor, combinado)}
 
 
@@ -244,7 +258,10 @@ def _resumen_para_llm(estado: Estado) -> dict:
 def _recomendacion_reglas(estado: Estado) -> str:
     decision = estado["decision"]
     if not decision.get("opcion"):
-        return "No fue posible recomendar una opción: no se encontraron ofertas comparables suficientes."
+        texto = ["No se puede recomendar un presupuesto: ninguna opción cubre la lista completa."]
+        texto += [f"- {m}" for m in decision["motivos"][1:]]
+        texto.append("- Revise en la sección de productos sin cotización si faltó la oferta o falló la consulta.")
+        return "\n".join(texto)
     texto = [f"Se recomienda la opción **{decision['opcion']}**."]
     texto += [f"- {m}" for m in decision["motivos"]]
     texto.append("- El total final no está confirmado mientras el costo de envío no se verifique en el comercio.")

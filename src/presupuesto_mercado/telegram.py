@@ -134,11 +134,22 @@ def resumen_html(final: dict) -> str:
     partes = [f"<b>Presupuesto de mercado</b> · {html.escape(solicitud.ciudad or 'ciudad no indicada')}", ""]
     partes += [f"• {html.escape(i.texto_original or i.producto)}" for i in solicitud.items]
     partes += ["", "<b>Opciones</b>"]
-    opciones = final["presupuestos"] + ([final["combinado"]] if final.get("combinado") else [])
+    opciones = [p for p in final["presupuestos"] if p.lineas] + ([final["combinado"]] if final.get("combinado") else [])
     for p in opciones:
         total = cop(p.total_confirmado) if p.total_confirmado is not None else "no confirmado"
         partes.append(f"• {html.escape(p.nombre)}: {len(p.lineas)}/{n} productos · subtotal "
                       f"<b>{cop(p.subtotal_productos)}</b> · total final {total}")
+    if not opciones:
+        partes.append("• Ningún supermercado tiene productos cotizados.")
+    nombres_items = {i.id: i.producto for i in solicitud.items}
+    fallidas: dict[str, list[str]] = {}
+    for r in final["resultados"]:
+        if r.errores and not r.ofertas:
+            fallidas.setdefault(final["nombres"].get(r.proveedor, r.proveedor), []).append(
+                nombres_items.get(r.item_id, r.item_id))
+    if fallidas:
+        partes += ["", "<b>No se pudo consultar</b> (falla del sitio o de la red, no falta de producto)"]
+        partes += [f"• {html.escape(p)}: {html.escape(', '.join(dict.fromkeys(i)))}" for p, i in fallidas.items()]
     partes += ["", "<b>Recomendación</b>", html_desde_markdown(final["recomendacion"])]
     partes += ["", "<i>Los precios son los publicados en los sitios web y pueden variar en su ciudad. "
                    "El envío no se toma como cero: si no se conoce, el total final queda sin confirmar.</i>"]
@@ -154,13 +165,15 @@ def _item_html(item: Any) -> str:
     return f"• {html.escape(cantidad)} de {html.escape(item.producto)}{html.escape(extra)}"
 
 
-def plan_html(solicitud: Any, nombres: dict[str, str], aclarada: bool) -> str:
+def plan_html(solicitud: Any, nombres: dict[str, str], aclarada: bool, presentar: int | None = None) -> str:
     """Confirma qué se va a buscar, dónde y para qué ciudad, antes de consultar los supermercados."""
     inicio = "Entendido, con su aclaración se buscará:" if aclarada else "Se buscará:"
     lineas = [inicio, ""] + [_item_html(i) for i in solicitud.items]
     lineas += ["", f"<b>Ciudad:</b> {html.escape(solicitud.ciudad or 'sin indicar')}",
-               f"<b>Supermercados:</b> {html.escape(', '.join(nombres.values()))}",
-               "", "Se están consultando los precios; esto tarda de uno a tres minutos."]
+               f"<b>Supermercados:</b> {html.escape(', '.join(nombres.values()))}"]
+    if presentar:
+        lineas.append(f"Se presentarán los {presentar} con más productos y mejor precio.")
+    lineas += ["", "Se están consultando los precios; esto tarda de uno a tres minutos."]
     return "\n".join(lineas)
 
 
@@ -304,7 +317,8 @@ class ServidorTelegram:
                             self._log("PROCESO", "blue", chat_id,
                                       f"{nodo} ({time.monotonic() - inicio:.1f} s){self._detalle(nodo, cambios)}")
                         if nodo == "planificar":
-                            await self._enviar(chat_id, plan_html(cambios["solicitud"], cambios["nombres"], aclarada),
+                            await self._enviar(chat_id, plan_html(cambios["solicitud"], cambios["nombres"], aclarada,
+                                                         cambios.get("presentar")),
                                                "productos que se buscarán", mensaje_id)
             finally:
                 escribiendo.cancel()

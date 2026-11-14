@@ -135,6 +135,17 @@ async def test_errores_de_la_api_no_exponen_el_token():
         await rechazo.obtener_bot()
 
 
+async def test_resumen_separa_consultas_fallidas(api, tmp_path, tres_tiendas):
+    cliente = ClienteTelegram(TOKEN, "https://bot.test", transport=httpx.MockTransport(api))
+    servidor = ServidorTelegram(cliente, object(), salida=tmp_path, consola=Console(record=True, width=200))
+    await servidor.atender(mensaje("Necesito 5 kg de arroz y 2 litros de aceite en Medellín"))
+    plan, resumen = [d["text"] for d in api.enviados()][1:3]
+    assert "EXITO, D1, JUMBO" in plan
+    assert "EXITO" not in resumen.split("<b>No se pudo consultar</b>")[0]
+    assert "<b>No se pudo consultar</b> (falla del sitio o de la red, no falta de producto)\n• EXITO: arroz, aceite" in resumen
+    assert "Se recomienda la opción <b>Compra completa en JUMBO</b>" in resumen
+
+
 def test_formato_html():
     assert html_desde_markdown("Se recomienda **D1 & Co** <x>\n- motivo") == \
         "Se recomienda <b>D1 &amp; Co</b> &lt;x&gt;\n• motivo"

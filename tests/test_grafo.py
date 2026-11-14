@@ -33,3 +33,16 @@ async def test_interrupcion_para_aclarar(falsos):
     final = await g.ainvoke(Command(resume="En Cali"), config)
     assert final["solicitud"].ciudad == "Cali"
     assert final["informe"]
+
+
+async def test_n_supermercados_consulta_todos_y_presenta_los_mejores(tres_tiendas):
+    g = modulo_grafo.construir_grafo(modulo_grafo.crear_checkpointer())
+    config = {"configurable": {"thread_id": "t3", "sin_llm": True, "navegador": object()}}
+    final = await g.ainvoke({"texto": "Necesito 5 kg de arroz y 2 litros de aceite. Consulta dos supermercados "
+                                      "y prepara un presupuesto para Medellín."}, config)
+    assert final["proveedores"] == ["exito", "d1", "jumbo"]  # se consultaron todos
+    assert [p.nombre for p in final["presupuestos"]] == ["Compra completa en JUMBO", "Compra parcial en D1"]
+    assert final["decision"]["opcion"] == "Compra completa en JUMBO"
+    assert any("No se presentan: EXITO" in s for s in final["solicitud"].suposiciones)
+    informe = final["informe"]
+    assert "Compra completa en EXITO" not in informe

@@ -45,10 +45,10 @@ uv run python -c "from presupuesto_mercado.grafo import grafo; print(grafo.get_g
 |---|---|---|
 | `interpretar` | Convierte el texto en una `Solicitud`: producto, cantidad, unidad, marca (preferida u obligatoria), presentación, atributos, exclusiones, ciudad, proveedores pedidos y costos que el usuario conoce. | LLM con salida estructurada (Pydantic); intérprete por reglas como respaldo |
 | `validar` / `aclarar` | Detecta datos imprescindibles faltantes (cantidad, unidad, ciudad). En modo interactivo pausa el grafo con `interrupt()` (human-in-the-loop); si no, registra una suposición explícita. | Reglas |
-| `planificar` | Resuelve qué proveedores consultar (mínimo dos) y registra los que no tienen precios en línea. | Reglas |
+| `planificar` | Resuelve qué proveedores consultar (mínimo dos) y registra los que no tienen precios en línea. Si se piden "N supermercados" sin nombrarlos, se consultan todos y se marca cuántos presentar. | Reglas |
 | `consultar_proveedor` | Una rama paralela por proveedor (`Send`). Ubica la categoría en el sitemap, renderiza el listado con Playwright y extrae nombre, presentación, precio, moneda, URL, SKU, disponibilidad, vendedor y fecha de consulta. | Playwright |
 | `evaluar` | Clasifica cada resultado como **equivalente**, **sustituto aproximado**, **no comparable** o **no relacionado**, y normaliza unidades y precio por kg/L/und. | LLM para la equivalencia; reglas para la comparabilidad, que el LLM no puede saltarse |
-| `presupuestar` | Elige la combinación de empaques más barata que cubre cada cantidad, arma un presupuesto por proveedor y una compra combinada, y aplica la regla de recomendación. | Reglas (aritmética auditable) |
+| `presupuestar` | Elige la combinación de empaques más barata que cubre cada cantidad, arma un presupuesto por proveedor y una compra combinada, se queda con los N mejores si se pidieron N supermercados y aplica la regla de recomendación. | Reglas (aritmética auditable) |
 | `recomendar` | Redacta la explicación de la opción ya elegida, sin cambiar números. | LLM; texto por reglas como respaldo |
 | `informe` | Genera el informe Markdown y la evidencia JSON. | Reglas |
 
@@ -69,9 +69,9 @@ El estado es un `TypedDict` (`Estado`). Los campos con reductor acumulan lo que 
 | Campo | Lo escribe | Reductor |
 |---|---|---|
 | `texto`, `opciones` | entrada; `aclarar` agrega la aclaración a `texto` | reemplazo |
-| `solicitud` | `interpretar`; `planificar` le agrega suposiciones | reemplazo |
+| `solicitud` | `interpretar`; `planificar` y `presupuestar` le agregan suposiciones | reemplazo |
 | `preguntas`, `aclarado` | `validar`, `aclarar` | reemplazo |
-| `proveedores`, `nombres`, `mecanismos` | `planificar` | reemplazo |
+| `proveedores`, `presentar`, `nombres`, `mecanismos` | `planificar` | reemplazo |
 | `resultados` | cada rama de `consultar_proveedor` | `operator.add` |
 | `evaluadas` | `evaluar` | reemplazo |
 | `presupuestos`, `combinado`, `decision` | `presupuestar` | reemplazo |
@@ -117,7 +117,9 @@ No se usa ninguna API privada ni el buscador interno de las tiendas: sus `robots
 - **D1 y Olímpica:** desde los datos estructurados schema.org (`ItemList` → `Product` → `Offer`).
 - **Éxito, Carulla y Jumbo:** desde las tarjetas de producto del DOM.
 
-Antes de cada solicitud se verifica `robots.txt`. Entre solicitudes al mismo dominio se espera un intervalo y los resultados se guardan en caché. Si un sitio responde con un bloqueo, se deja de consultar.
+Los sitemaps también se descargan con Chromium: Éxito responde 403 a los clientes HTTP que no son navegadores, aunque la ruta esté permitida en `robots.txt`.
+
+Antes de cada solicitud se verifica `robots.txt`. Entre solicitudes al mismo dominio se espera un intervalo y los resultados se guardan en caché. Si varias consultas necesitan la misma página a la vez, se descarga una sola vez. Las fallas transitorias de red (tiempo agotado, `net::ERR_…`) se reintentan hasta tres veces con espera creciente. Si un sitio responde con un bloqueo (403, 429 o página de verificación), se deja de consultar durante 30 minutos y el informe lo registra como "no se pudo consultar", distinto de "sin oferta equivalente".
 
 Cada oferta conserva: nombre, marca, presentación, contenido normalizado, precio general, precio de lista, precio condicionado (tarjeta), moneda, proveedor, URL del producto, URL del listado, SKU, fecha de consulta, disponibilidad, vendedor y tipo de fuente.
 
@@ -125,11 +127,11 @@ Cada oferta conserva: nombre, marca, presentación, contenido normalizado, preci
 
 1. La interpretación de la solicitud y las suposiciones explícitas.
 2. Una tabla por producto con todas las ofertas encontradas, su clasificación y el motivo, el precio por kg/L/und, la disponibilidad y el enlace.
-3. Un presupuesto de compra completa por proveedor y una compra combinada (mejor precio por producto), cuando es viable.
+3. Un presupuesto por proveedor ("compra completa" o "compra parcial", según cubra o no toda la lista) y una compra combinada (mejor precio por producto), cuando es viable. Los proveedores sin ningún producto cotizado no se presentan como opción.
 4. Un resumen comparativo con **subtotal de productos** y **total final confirmado**. El total queda "no confirmado" mientras el envío no se conozca: un envío desconocido nunca se toma como cero.
-5. Los productos sin cotización y las incidencias de consulta.
+5. Los productos sin cotización, separando "no se pudo consultar" (falla del sitio o de la red) de "sin oferta equivalente", y las incidencias de consulta.
 6. Las condiciones no verificadas: precio por ciudad, cobertura de entrega, precios con tarjeta, disponibilidad no publicada.
-7. La recomendación explicada.
+7. La recomendación explicada. Si ninguna opción cubre la lista completa, no se recomienda ninguna y solo se indica la de mayor cobertura como referencia.
 8. Las fuentes consultadas, con fecha y número de productos leídos, y el mecanismo usado por proveedor.
 
 ## Instalación
@@ -148,6 +150,7 @@ Sin credenciales de LLM el sistema funciona igual, con reglas heurísticas, y lo
 
 ```bash
 # Solicitud libre: si no se nombran supermercados se consultan los cinco
+# ("consulta dos supermercados" también consulta los cinco y presenta los dos mejores)
 uv run presupuesto-mercado "Necesito 30 huevos AA, 6 litros de leche entera y 2 kg de arroz Diana (solo Diana) en Bogotá"
 
 # Proveedores explícitos y aceptación de sustitutos cuando no hay equivalentes
@@ -224,9 +227,10 @@ Las pruebas cubren:
 - reglas de comparabilidad y de marca obligatoria;
 - selección de empaques;
 - presupuestos con envío desconocido;
-- regla de recomendación;
-- el grafo completo sin red ni LLM, con proveedores simulados, catálogo CSV e interrupción para aclarar;
-- el bot de Telegram contra una Bot API simulada: acuses, confirmación de lo que se buscará, resumen e informe, pregunta y reanudación, `/cancelar`, chats no permitidos y errores sin el token.
+- regla de recomendación, incluido el caso sin cobertura completa;
+- reintentos ante fallas de red y descarga única de páginas compartidas;
+- el grafo completo sin red ni LLM, con proveedores simulados, catálogo CSV, interrupción para aclarar, un proveedor caído y la selección de los N mejores supermercados;
+- el bot de Telegram contra una Bot API simulada: acuses, confirmación de lo que se buscará, resumen e informe, consultas fallidas, pregunta y reanudación, `/cancelar`, chats no permitidos y errores sin el token.
 
 ## Limitaciones conocidas
 

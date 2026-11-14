@@ -87,3 +87,20 @@ def test_recomendacion_no_cambia_por_ahorro_pequeno():
     por_prov, combinado = construir_presupuestos(_solicitud(), EVALUADAS, ["a", "b"], {"a": "A", "b": "B"})
     decision = elegir_recomendacion(por_prov, combinado)
     assert decision["opcion"] == "Compra completa en A"  # el combinado ahorra solo $1.000
+
+
+def test_sin_cobertura_completa_no_hay_recomendacion():
+    solo_arroz = {"arroz": EVALUADAS["arroz"]}
+    por_prov, combinado = construir_presupuestos(_solicitud(), solo_arroz, ["a", "b"], {"a": "A", "b": "B"})
+    assert [p.nombre for p in por_prov] == ["Compra parcial en A", "Compra parcial en B"]
+    decision = elegir_recomendacion(por_prov, combinado)
+    assert decision["opcion"] is None
+    assert "Solo como referencia" in decision["motivos"][1]
+
+
+def test_combinada_completa_se_recomienda_si_ninguno_cubre_solo():
+    evaluadas = {"arroz": [ev(oferta("b", "Arroz B (5000 gr)", 15000))],
+                 "aceite": [ev(oferta("a", "Aceite A (2000 ml)", 14000, "aceite"))]}
+    por_prov, combinado = construir_presupuestos(_solicitud(), evaluadas, ["a", "b"], {"a": "A", "b": "B"})
+    assert combinado.cobertura_completa
+    assert elegir_recomendacion(por_prov, combinado)["opcion"] == combinado.nombre
